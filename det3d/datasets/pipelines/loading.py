@@ -1,12 +1,9 @@
-import os
-import pickle 
-from functools import reduce
+import pickle
 from pathlib import Path
 import numpy as np
-from pyquaternion import Quaternion
 from nuscenes.utils.data_classes import RadarPointCloud
-from nuscenes.utils.geometry_utils import transform_matrix
 from ..registry import PIPELINES
+from pyquaternion import Quaternion
 
 def _dict_select(dict_, inds):
     for k, v in dict_.items():
@@ -15,15 +12,11 @@ def _dict_select(dict_, inds):
         else:
             dict_[k] = v[inds]
 
-def read_file(path, tries=2, num_point_feature=4, virtual=False, modality="lidar"):
+def read_file(path, tries=2, num_point_feature=4, virtual=False):
     if virtual:
-            raise NotImplementedError()
-    
-    if modality == "lidar":
+        raise NotImplementedError()
+    else:
         points = np.fromfile(path, dtype=np.float32).reshape(-1, 5)[:, :num_point_feature]
-    elif modality == "radar":
-        pc = RadarPointCloud.from_file(path)
-        return pc.points.T
 
     return points
 
@@ -40,33 +33,35 @@ def remove_close(points, radius: float) -> None:
     return points
 
 
-def read_sweep(sweep, virtual=False, modality="lidar"):
+def read_sweep(sweep, virtual=False):
     min_distance = 1.0
-    if modality == "lidar":
-        points_sweep = read_file(str(sweep["lidar_path"]), virtual=virtual, modality="lidar").T
-        points_sweep = remove_close(points_sweep, min_distance)
-        nbr_points = points_sweep.shape[1]
-    
-        if sweep["transform_matrix"] is not None:
-            points_sweep[:3, :] = sweep["transform_matrix"].dot(
-                np.vstack((points_sweep[:3, :], np.ones(nbr_points)))
-            )[:3, :]
-        curr_times = sweep["time_lag"] * np.ones((1, points_sweep.shape[1]))
+    points_sweep = read_file(str(sweep["lidar_path"]), virtual=virtual).T
+    points_sweep = remove_close(points_sweep, min_distance)
 
-    if modality == "radar":
-        points_sweep = np.empty([18, 0])
-        for path, tm in zip(sweep["radar_paths"], sweep["radar_transfrom_matrices"]):
-            if path is None or tm is None:
-                continue
-            _points_sweep = read_file(path, virtual=virtual, modality="radar").T
-            _points_sweep = remove_close(_points_sweep, min_distance)
-            _nbr_points = _points_sweep.shape[1]
-            _points_sweep[:3, :] = tm.dot(np.vstack((_points_sweep[:3, :], np.ones(_nbr_points))))[:3, :]
-            points_sweep = np.hstack([points_sweep, _points_sweep])
-
-        curr_times = sweep["radar_time_lags"][0] * np.ones((1, points_sweep.shape[1]))
+    nbr_points = points_sweep.shape[1]
+    if sweep["transform_matrix"] is not None:
+        points_sweep[:3, :] = sweep["transform_matrix"].dot(
+            np.vstack((points_sweep[:3, :], np.ones(nbr_points)))
+        )[:3, :]
+    curr_times = sweep["time_lag"] * np.ones((1, points_sweep.shape[1]))
 
     return points_sweep.T, curr_times.T
+
+
+
+def read_radar_sweep(sweep):
+    min_distance = 1.0
+    points_sweep = RadarPointCloud.from_file(str(sweep["radar_path"])).points
+    points_sweep = remove_close(points_sweep, min_distance)
+
+    nbr_points = points_sweep.shape[1]
+    if sweep["transform_matrix"] is not None:
+        points_sweep[:3, :] = sweep["transform_matrix"].dot(
+            np.vstack((points_sweep[:3, :], np.ones(nbr_points)))
+        )[:3, :]
+    curr_times = sweep["time_lag"] * np.ones([points_sweep.shape[1]])
+
+    return points_sweep.T, curr_times
 
 
 
@@ -82,29 +77,19 @@ class LoadPointCloudFromFile(object):
         self.type = dataset
         self.random_select = kwargs.get("random_select", False)
         self.npoints = kwargs.get("npoints", 16834)
-        self.modality = kwargs.get("modality", "lidar")
-
-        assert self.modality in ["lidar", "radar"], "Invalid modality"
 
     def __call__(self, res, info):
 
         res["type"] = self.type
 
         if self.type != "NuScenesDataset":
-            raise NotImplementedError
+            raise NotImplementedError()
 
-        nsweeps = res[self.modality]["nsweeps"]
+        nsweeps = res["lidar"]["nsweeps"]
 
-        if self.modality == "radar":
-            points = np.empty([0, 18])
-            for radar_path in info["radar_paths"]:
-                radar_points = read_file(radar_path, virtual=False, modality="radar")
-                points = np.concatenate([points, radar_points])
-        else:
-            sensor_path = Path(info["lidar_path"])
-            points = read_file(str(sensor_path), virtual=res["virtual"], modality="lidar")
+        lidar_path = Path(info["lidar_path"])
+        points = read_file(str(lidar_path), virtual=res["virtual"])
 
-        
         sweep_points_list = [points]
         sweep_times_list = [np.zeros((points.shape[0], 1))]
 
@@ -116,19 +101,98 @@ class LoadPointCloudFromFile(object):
 
         for i in np.random.choice(len(info["sweeps"]), nsweeps - 1, replace=False):
             sweep = info["sweeps"][i]
-            if self.modality == "radar" and not sweep.get("radar_paths"):
-                continue
-            points_sweep, times_sweep = read_sweep(sweep, virtual=res["virtual"], modality=self.modality)
+            points_sweep, times_sweep = read_sweep(sweep, virtual=res["virtual"])
             sweep_points_list.append(points_sweep)
             sweep_times_list.append(times_sweep)
 
         points = np.concatenate(sweep_points_list, axis=0)
         times = np.concatenate(sweep_times_list, axis=0).astype(points.dtype)
 
-        res[self.modality]["points"] = points
-        res[self.modality]["times"] = times
-        res[self.modality]["combined"] = np.hstack([points, times])
-    
+        res["lidar"]["points"] = points
+        res["lidar"]["times"] = times
+        res["lidar"]["combined"] = np.hstack([points, times])
+
+        return res, info
+
+
+RADAR_RMS = {
+    "RADAR_FRONT": np.array([[0, -1], [1, 0]]),
+    "RADAR_FRONT_RIGHT": np.array([[1, 0], [0, 1]]),
+    "RADAR_BACK_RIGHT": np.array([[0, 1], [-1, 0]]),
+    "RADAR_BACK_LEFT": np.array([[0, 1], [-1, 0]]),
+    "RADAR_FRONT_LEFT": np.array([[-1, 0], [0, 1]])
+}
+@PIPELINES.register_module
+class LoadRadarPointCloudFromFile(object):
+    def __init__(self, dataset="NuScenesDataset", **kwargs):
+        self.type = dataset
+        self.random_select = kwargs.get("random_select", False)
+        self.npoints = kwargs.get("npoints", 16834)
+        self.front_only = kwargs.get("front_only", False)
+        self.output_global = kwargs.get("output_global", True)
+        self.align_velocity = kwargs.get("align_velocity", False)
+
+    def __call__(self, res, info):
+
+        res["type"] = self.type
+
+        if self.type != "NuScenesDataset":
+            raise NotImplementedError()
+
+        nsweeps = res["radar"]["nsweeps"]
+
+        if self.front_only:
+            RADAR_CHANS = ["RADAR_FRONT"]
+        else:
+            RADAR_CHANS = ['RADAR_FRONT', 'RADAR_FRONT_RIGHT', 'RADAR_BACK_RIGHT', 'RADAR_BACK_LEFT', 'RADAR_FRONT_LEFT']
+
+        
+        point_clouds = {}
+        times_by_chan = {}
+        
+        for chan, radar_path, timestamp in zip(RADAR_CHANS, info["radar_path"], info["radar_timestamp"]):
+            point_clouds[chan] = RadarPointCloud.from_file(radar_path)
+            times_by_chan[chan] = np.empty([point_clouds[chan].points.shape[1]], dtype=np.float32)
+            times_by_chan[chan].fill(timestamp)
+
+
+        for chan, radar_sweeps in zip(RADAR_CHANS, info["radar_sweeps"]):
+            assert (nsweeps - 1) == len(radar_sweeps), f"nsweeps {nsweeps} should equal to list length {len(radar_sweeps)}."
+
+            for sweep in radar_sweeps:
+                points_sweep, times_sweep = read_radar_sweep(sweep)
+                point_clouds[chan].points = np.hstack([point_clouds[chan].points, points_sweep.T])
+                times_by_chan[chan] = np.concatenate([times_by_chan[chan], times_sweep], axis=0)
+
+        points = np.empty([18, 0], dtype=np.float32)
+        times = np.empty([0], dtype=np.float32)
+
+        for p, cs_record, pose_rec, chan_times, c in zip(
+                point_clouds.items(), info["radar_ref_cs_rec"], info["radar_ref_pose_rec"], times_by_chan.values(), ["b", "g", "r","c", "m"]
+        ):
+            chan, pc = p
+            if self.output_global:
+                pc.rotate(Quaternion(cs_record['rotation']).rotation_matrix)
+                pc.translate(np.array(cs_record['translation']))
+
+                pc.rotate(Quaternion(pose_rec['rotation']).rotation_matrix)
+                pc.translate(np.array(pose_rec['translation']))
+
+            if self.align_velocity:
+                pc.points[6:8, :] = RADAR_RMS[chan].dot(pc.points[6:8, :])
+                pc.points[8:10, :] = RADAR_RMS[chan].dot(pc.points[8:10, :])
+            
+            points = np.hstack([points, pc.points])
+            times = np.concatenate([times, chan_times], axis=0)
+
+
+        points = points.T
+        times = np.zeros([points.shape[0], 1])
+
+        res["radar"]["points"] = points
+        res["radar"]["times"] = times
+        res["radar"]["combined"] = np.hstack([points, times])
+
         return res, info
 
 

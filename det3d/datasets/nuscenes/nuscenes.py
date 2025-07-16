@@ -33,6 +33,7 @@ class NuScenesDataset(PointCloudDataset):
         info_path,
         root_path,
         nsweeps=0, # here set to zero to catch unset nsweep
+        nrsweeps=0,
         cfg=None,
         pipeline=None,
         class_names=None,
@@ -49,8 +50,12 @@ class NuScenesDataset(PointCloudDataset):
         )
 
         self.nsweeps = nsweeps
+        self.nrsweeps = nrsweeps
         assert self.nsweeps > 0, "At least input one sweep please!"
+        if "radar" in modalities:
+            assert self.nrsweeps > 0, "At least 1 radar sweep is required!"
         print(self.nsweeps)
+        print(self.nrsweeps)
 
         self._info_path = info_path
         self._class_names = class_names
@@ -176,7 +181,7 @@ class NuScenesDataset(PointCloudDataset):
             "radar": {
                 "type": "radar",
                 "points": None,
-                "nsweeps": self.nsweeps,
+                "nsweeps": self.nrsweeps,
                 # "ground_plane": -gp[-1] if with_gp else None,
                 "annotations": None,
             },

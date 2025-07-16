@@ -354,182 +354,52 @@ def find_closet_camera_tokens(nusc, pointsensor, ref_sample):
 def _fill_trainval_infos(nusc, train_scenes, val_scenes, test=False, nsweeps=10, filter_zero=True, modalities=["lidar"]):
     from nuscenes.utils.geometry_utils import transform_matrix
 
+    if type(nsweeps) in (list, tuple):
+        num_lidar_sweeps, num_radar_sweeps, *_ = nsweeps
+    else:
+        num_lidar_sweeps = nsweeps
+        num_radar_sweeps = nsweeps
+
     train_nusc_infos = []
     val_nusc_infos = []
 
-    ref_chan = "LIDAR_TOP" # The reference channel of the current sample_rec that the point clouds are mapped to.
-    ref_radar_chan = "RADAR_FRONT"
-    chan = "LIDAR_TOP"  # The lidar channel from which we track back n sweeps to aggregate the point cloud.
-    radar_chan = "RADAR_FRONT"
+    ref_chan = "LIDAR_TOP"  # The radar channel from which we track back n sweeps to aggregate the point cloud.
+    chan = "LIDAR_TOP"  # The reference channel of the current sample_rec that the point clouds are mapped to.
 
     for sample in tqdm(nusc.sample):
         """ Manual save info["sweeps"] """        
-        # Get reference pose and timestamp
-        ref_sd_token = sample["data"][ref_chan]
-        ref_radar_sd_tokens = [sample["data"][c] for c in RADAR_CHANS]
+        info = {"token": sample["token"]}
 
-        ref_sd_rec = nusc.get("sample_data", ref_sd_token)
-        ref_cs_rec = nusc.get(
-            "calibrated_sensor", ref_sd_rec["calibrated_sensor_token"]
-        )
-        ref_pose_rec = nusc.get("ego_pose", ref_sd_rec["ego_pose_token"])
-        ref_time = 1e-6 * ref_sd_rec["timestamp"]
-
-        ref_lidar_path, ref_boxes, _ = get_sample_data(nusc, ref_sd_token)
-        
-        ref_radar_paths = []
-        for radar_token in ref_radar_sd_tokens:
-            _path, _, _ = get_sample_data(nusc, radar_token)
-            ref_radar_paths.append(_path)
-
-        # Homogeneous transform from ego car frame to reference frame
-        ref_from_car = transform_matrix(
-            ref_cs_rec["translation"], Quaternion(ref_cs_rec["rotation"]), inverse=True
-        )
-
-        # Homogeneous transformation matrix from global to _current_ ego car frame
-        car_from_global = transform_matrix(
-            ref_pose_rec["translation"],
-            Quaternion(ref_pose_rec["rotation"]),
-            inverse=True,
-        )
-
-        
-        info = {
-            "lidar_path": ref_lidar_path,
-            "radar_paths": ref_radar_paths,
-            "token": sample["token"],
-            "sweeps": [],
-            "ref_from_car": ref_from_car,
-            "car_from_global": car_from_global,
-            "timestamp": ref_time,
+        all_cam_info = {
+            "ref_cam_path": [],
+            "ref_cam_intrinsic": [],
+            "cam_poserecord": [],
+            "cam_cs_record": []
         }
-
-        sample_data_token = sample["data"][chan]
-        radar_sample_data_tokens = [sample["data"][c] for c in RADAR_CHANS]
-
-        curr_sd_rec = nusc.get("sample_data", sample_data_token)
-        radar_curr_sd_recs = [nusc.get("sample_data", token) for token in radar_sample_data_tokens]
+        for cam_chan in CAM_CHANS:
+            cam_info = _get_cam_info(nusc, sample, cam_chan)
+            info.update(concat_dict(all_cam_info, cam_info))
         
-        sweeps = []
-        for s in range(nsweeps - 1):
-            if curr_sd_rec["prev"] == "":
-                if len(sweeps) == 0:
-                    sweep = {
-                        "lidar_path": ref_lidar_path,
-                        "sample_data_token": curr_sd_rec["token"],
-                        "transform_matrix": None,
-                        "time_lag": 0,
-                    }
-                else:
-                    sweep = sweeps[-1]
-            else:
-                curr_sd_rec = nusc.get("sample_data", curr_sd_rec["prev"])
-                
-                # Get past pose
-                current_pose_rec = nusc.get("ego_pose", curr_sd_rec["ego_pose_token"])
-                global_from_car = transform_matrix(
-                    current_pose_rec["translation"],
-                    Quaternion(current_pose_rec["rotation"]),
-                    inverse=False,
-                )
-
-                # Homogeneous transformation matrix from sensor coordinate frame to ego car frame.
-                current_cs_rec = nusc.get(
-                    "calibrated_sensor", curr_sd_rec["calibrated_sensor_token"]
-                )
-                car_from_current = transform_matrix(
-                    current_cs_rec["translation"],
-                    Quaternion(current_cs_rec["rotation"]),
-                    inverse=False,
-                )
-
-                tm = reduce(
-                    np.dot,
-                    [ref_from_car, car_from_global, global_from_car, car_from_current],
-                )
-
-                lidar_path = nusc.get_sample_data_path(curr_sd_rec["token"])
-
-                time_lag = ref_time - 1e-6 * curr_sd_rec["timestamp"]
-
-                sweep = {
-                    "lidar_path": lidar_path,
-                    "sample_data_token": curr_sd_rec["token"],
-                    "transform_matrix": tm,
-                    "global_from_car": global_from_car,
-                    "car_from_current": car_from_current,
-                    "time_lag": time_lag,
-                }
-                # sweeps.append(sweep)
-
-            if any(rec["prev"] == "" for rec in radar_curr_sd_recs):
-                if len(sweeps) == 0:
-                    sweep["radar_paths"] = ref_radar_paths
-                    sweep["radar_sample_data_tokens"] = radar_sample_data_tokens
-                    sweep["radar_transfrom_matrices"] = [None for _ in RADAR_CHANS]
-                    sweep["radar_time_lags"] = [0 for _ in RADAR_CHANS]
-                else:
-                    sweep["radar_paths"] = sweeps[-1]["radar_paths"]
-                    sweep["radar_sample_data_tokens"] = sweeps[-1]["radar_sample_data_tokens"]
-                    sweep["radar_transfrom_matrices"] = sweeps[-1]["radar_transfrom_matrices"]
-                    sweep["radar_time_lags"] = sweeps[-1]["radar_time_lags"]
-            else:
-                prevs = [nusc.get("sample_data", rec["prev"]) for rec in radar_curr_sd_recs]
-                if nsweeps == 10:
-                    if s % 2 != 0:
-                        radar_curr_sd_recs = prevs
-                else:
-                    radar_curr_sd_recs = prevs
-
-                # Get past pose
-                radar_current_pose_recs = [nusc.get("ego_pose", rec["ego_pose_token"]) for rec in radar_curr_sd_recs]
-
-                radar_global_from_cars = [transform_matrix(
-                    recs["translation"],
-                    Quaternion(recs["rotation"]),
-                    inverse=False,
-                ) for recs in radar_current_pose_recs]
-
-                # Homogeneous transformation matrix from sensor coordinate frame to ego car frame.
-                radar_current_cs_recs = [
-                    nusc.get("calibrated_sensor", recs["calibrated_sensor_token"])
-                    for recs in radar_curr_sd_recs
-                ]
-
-                radar_car_from_currents = [transform_matrix(
-                    recs["translation"],
-                    Quaternion(recs["rotation"]),
-                    inverse=False,
-                ) for recs in radar_current_cs_recs]
-
-                radar_tms = [
-                    reduce(np.dot, [ref_from_car, car_from_global, radar_global_from_car, radar_car_from_current])
-                    for radar_global_from_car, radar_car_from_current in zip(radar_global_from_cars, radar_car_from_currents)
-                ]
-
-                radar_paths = [nusc.get_sample_data_path(recs["token"]) for recs in radar_curr_sd_recs]
-
-                radar_time_lags = [ref_time - 1e-6 * recs["timestamp"] for recs in radar_curr_sd_recs]
-
-                
-                sweep["radar_paths"] = radar_paths
-                sweep["radar_sample_data_tokens"] = [recs["token"] for recs in radar_curr_sd_recs]
-                sweep["radar_transfrom_matrices"] = radar_tms
-                sweep["radar_global_from_cars"] = radar_global_from_cars
-                sweep["radar_car_from_currents"] = radar_car_from_currents
-                sweep["radar_time_lags"] = radar_time_lags
-
-
-            sweeps.append(sweep)
-            
-        info["sweeps"] = sweeps
-
-        assert (
-            len(info["sweeps"]) == nsweeps - 1
-        )
+        if "lidar" in modalities:
+            info.update(_get_lidar_info(nusc, sample, ref_chan, chan, num_lidar_sweeps))
         
+        if "radar" in modalities:
+            all_radar_info = {
+                "radar_path": [],
+                "radar_sweeps": [],
+                "radar_ref_cs_rec": [],
+                "radar_ref_pose_rec": [],
+                "radar_ref_from_car": [],
+                "radar_car_from_global": [],
+                "radar_timestamp": [],
+            }
+            for radar_chan in RADAR_CHANS:
+                radar_info = _get_radar_info(nusc, sample, radar_chan, radar_chan, num_radar_sweeps)
+                info.update(concat_dict(all_radar_info, radar_info))
+
         if not test:
+            _, ref_boxes, _ = get_sample_data(nusc, sample["data"][ref_chan])
+
             annotations = [
                 nusc.get("sample_annotation", token) for token in sample["anns"]
             ]
@@ -540,14 +410,10 @@ def _fill_trainval_infos(nusc, train_scenes, val_scenes, test=False, nsweeps=10,
             dims = np.array([b.wlh for b in ref_boxes]).reshape(-1, 3)
             # rots = np.array([b.orientation.yaw_pitch_roll[0] for b in ref_boxes]).reshape(-1, 1)
             velocity = np.array([b.velocity for b in ref_boxes]).reshape(-1, 3)
-            rots = np.array([quaternion_yaw(b.orientation) for b in ref_boxes]).reshape(
-                -1, 1
-            )
+            rots = np.array([quaternion_yaw(b.orientation) for b in ref_boxes]).reshape(-1, 1)
             names = np.array([b.name for b in ref_boxes])
             tokens = np.array([b.token for b in ref_boxes])
-            gt_boxes = np.concatenate(
-                [locs, dims, velocity[:, :2], -rots - np.pi / 2], axis=1
-            )
+            gt_boxes = np.concatenate([locs, dims, velocity[:, :2], -rots - np.pi / 2], axis=1)
             # gt_boxes = np.concatenate([locs, dims, rots], axis=1)
 
             assert len(annotations) == len(gt_boxes) == len(velocity)
@@ -568,9 +434,224 @@ def _fill_trainval_infos(nusc, train_scenes, val_scenes, test=False, nsweeps=10,
         else:
             val_nusc_infos.append(info)
 
-
     return train_nusc_infos, val_nusc_infos
 
+def _get_lidar_info(nusc, sample, ref_chan, chan, nsweeps=10):
+    # Get reference pose and timestamp
+    ref_sd_token = sample["data"][ref_chan]
+    ref_sd_rec = nusc.get("sample_data", ref_sd_token)
+    ref_cs_rec = nusc.get(
+        "calibrated_sensor", ref_sd_rec["calibrated_sensor_token"]
+    )
+    ref_pose_rec = nusc.get("ego_pose", ref_sd_rec["ego_pose_token"])
+    ref_time = 1e-6 * ref_sd_rec["timestamp"]
+
+    ref_lidar_path, _, _ = get_sample_data(nusc, ref_sd_token)
+
+    # Homogeneous transform from ego car frame to reference frame
+    ref_from_car = transform_matrix(
+        ref_cs_rec["translation"], Quaternion(ref_cs_rec["rotation"]), inverse=True
+    )
+
+    # Homogeneous transformation matrix from global to _current_ ego car frame
+    car_from_global = transform_matrix(
+        ref_pose_rec["translation"],
+        Quaternion(ref_pose_rec["rotation"]),
+        inverse=True,
+    )
+
+    info = {
+        "lidar_path": ref_lidar_path,
+        "sweeps": [],
+        "ref_from_car": ref_from_car,
+        "car_from_global": car_from_global,
+        "timestamp": ref_time,
+        "ref_cs_rec": ref_cs_rec,
+        "ref_pose_rec": ref_pose_rec
+    }
+
+    sample_data_token = sample["data"][chan]
+    curr_sd_rec = nusc.get("sample_data", sample_data_token)
+    sweeps = []
+    while len(sweeps) < nsweeps - 1:
+        if curr_sd_rec["prev"] == "":
+            if len(sweeps) == 0:
+                sweep = {
+                    "lidar_path": ref_lidar_path,
+                    "sample_data_token": curr_sd_rec["token"],
+                    "transform_matrix": None,
+                    "time_lag": curr_sd_rec["timestamp"] * 0,
+                }
+                sweeps.append(sweep)
+            else:
+                sweeps.append(sweeps[-1])
+        else:
+            curr_sd_rec = nusc.get("sample_data", curr_sd_rec["prev"])
+
+            # Get past pose
+            current_pose_rec = nusc.get("ego_pose", curr_sd_rec["ego_pose_token"])
+            global_from_car = transform_matrix(
+                current_pose_rec["translation"],
+                Quaternion(current_pose_rec["rotation"]),
+                inverse=False,
+            )
+
+            # Homogeneous transformation matrix from sensor coordinate frame to ego car frame.
+            current_cs_rec = nusc.get(
+                "calibrated_sensor", curr_sd_rec["calibrated_sensor_token"]
+            )
+            car_from_current = transform_matrix(
+                current_cs_rec["translation"],
+                Quaternion(current_cs_rec["rotation"]),
+                inverse=False,
+            )
+
+            tm = reduce(
+                np.dot,
+                [ref_from_car, car_from_global, global_from_car, car_from_current],
+            )
+
+            lidar_path = nusc.get_sample_data_path(curr_sd_rec["token"])
+
+            time_lag = ref_time - 1e-6 * curr_sd_rec["timestamp"]
+
+            sweep = {
+                "lidar_path": lidar_path,
+                "sample_data_token": curr_sd_rec["token"],
+                "transform_matrix": tm,
+                "global_from_car": global_from_car,
+                "car_from_current": car_from_current,
+                "time_lag": time_lag,
+            }
+            sweeps.append(sweep)
+
+    info["sweeps"] = sweeps
+
+    assert (
+        len(info["sweeps"]) == nsweeps - 1
+    )
+
+    return info
+
+
+def _get_radar_info(nusc: NuScenes, sample, ref_chan, chan, nsweeps=5):
+    # Get reference pose and timestamp
+    ref_sd_token = sample["data"][ref_chan]
+    ref_sd_rec = nusc.get("sample_data", ref_sd_token)
+    ref_cs_rec = nusc.get(
+        "calibrated_sensor", ref_sd_rec["calibrated_sensor_token"]
+    )
+    ref_pose_rec = nusc.get("ego_pose", ref_sd_rec["ego_pose_token"])
+    ref_time = 1e-6 * ref_sd_rec["timestamp"]
+
+    ref_radar_path, _, _ = get_sample_data(nusc, ref_sd_token)
+
+    # Homogeneous transform from ego car frame to reference frame
+    ref_from_car = transform_matrix(
+        ref_cs_rec["translation"], Quaternion(ref_cs_rec["rotation"]), inverse=True
+    )
+
+    # Homogeneous transformation matrix from global to _current_ ego car frame
+    car_from_global = transform_matrix(
+        ref_pose_rec["translation"],
+        Quaternion(ref_pose_rec["rotation"]),
+        inverse=True,
+    )
+
+    info = {
+        "radar_path": ref_radar_path,
+        "radar_sweeps": [],
+        "radar_ref_cs_rec": ref_cs_rec,
+        "radar_ref_pose_rec": ref_pose_rec,
+        "radar_ref_from_car": ref_from_car,
+        "radar_car_from_global": car_from_global,
+        "radar_timestamp": ref_time,
+    }
+
+    sample_data_token = sample["data"][chan]
+    curr_sd_rec = nusc.get("sample_data", sample_data_token)
+    sweeps = []
+    while len(sweeps) < nsweeps - 1:
+        if curr_sd_rec["prev"] == "":
+            if len(sweeps) == 0:
+                sweep = {
+                    "radar_path": ref_radar_path,
+                    "sample_data_token": curr_sd_rec["token"],
+                    "transform_matrix": None,
+                    "time_lag": curr_sd_rec["timestamp"] * 0,
+                }
+                sweeps.append(sweep)
+            else:
+                sweeps.append(sweeps[-1])
+        else:
+            curr_sd_rec = nusc.get("sample_data", curr_sd_rec["prev"])
+
+            # Get past pose
+            current_pose_rec = nusc.get("ego_pose", curr_sd_rec["ego_pose_token"])
+            global_from_car = transform_matrix(
+                current_pose_rec["translation"],
+                Quaternion(current_pose_rec["rotation"]),
+                inverse=False,
+            )
+
+            # Homogeneous transformation matrix from sensor coordinate frame to ego car frame.
+            current_cs_rec = nusc.get(
+                "calibrated_sensor", curr_sd_rec["calibrated_sensor_token"]
+            )
+            car_from_current = transform_matrix(
+                current_cs_rec["translation"],
+                Quaternion(current_cs_rec["rotation"]),
+                inverse=False,
+            )
+
+            tm = reduce(
+                np.dot,
+                [ref_from_car, car_from_global, global_from_car, car_from_current],
+            )
+
+            radar_path = nusc.get_sample_data_path(curr_sd_rec["token"])
+
+            time_lag = ref_time - 1e-6 * curr_sd_rec["timestamp"]
+
+            sweep = {
+                "radar_path": radar_path,
+                "sample_data_token": curr_sd_rec["token"],
+                "transform_matrix": tm,
+                "radar_global_from_car": global_from_car,
+                "radar_car_from_current": car_from_current,
+                "time_lag": time_lag,
+            }
+            sweeps.append(sweep)
+
+    info["radar_sweeps"] = sweeps
+
+    assert (
+        len(info["radar_sweeps"]) == nsweeps - 1
+    )
+
+    return info
+
+
+def _get_cam_info(nusc: NuScenes, sample, chan):
+    ref_cam_token = sample["data"][chan]
+    ref_cam_path, _, ref_cam_intrinsic = nusc.get_sample_data(ref_cam_token)
+
+    cam = nusc.get("sample_data",ref_cam_token)
+    cam_poserecord = nusc.get("ego_pose", cam["ego_pose_token"])
+    cam_cs_record = nusc.get("calibrated_sensor", cam["calibrated_sensor_token"])
+
+    return {
+        "ref_cam_path": ref_cam_path,
+        "ref_cam_intrinsic": ref_cam_intrinsic,
+        "cam_poserecord": cam_poserecord,
+        "cam_cs_record": cam_cs_record,
+    }
+
+def concat_dict(base, to_concat):
+    for key, val in to_concat.items():
+        base[key].append(val)
+    
+    return base
 
 def quaternion_yaw(q: Quaternion) -> float:
     """
@@ -632,6 +713,13 @@ def create_nuscenes_infos(root_path, version="v1.0-trainval", nsweeps=10, filter
         nusc, train_scenes, val_scenes, test, nsweeps=nsweeps, filter_zero=filter_zero, modalities=modalities
     )
 
+    if type(nsweeps) in (list, tuple):
+        num_lidar_sweeps, num_radar_sweeps, *_ = nsweeps
+        sweep_str = f"{num_lidar_sweeps:02d}_{num_radar_sweeps:02d}"
+    else:
+        sweep_str = f"{nsweeps:02d}"
+
+
     suffix = base_suffix
     suffix += "velo" if "lidar" in modalities else ""
     suffix += "_radar" if "radar" in modalities else ""
@@ -639,7 +727,7 @@ def create_nuscenes_infos(root_path, version="v1.0-trainval", nsweeps=10, filter
     if test:
         print(f"test sample: {len(train_nusc_infos)}")
         with open(
-            root_path / f"infos_test_{nsweeps}sweeps_with{suffix}.pkl", "wb"
+            root_path / f"infos_test_{sweep_str}sweeps_with{suffix}.pkl", "wb"
         ) as f:
             pickle.dump(train_nusc_infos, f)
     else:
@@ -647,11 +735,11 @@ def create_nuscenes_infos(root_path, version="v1.0-trainval", nsweeps=10, filter
             f"train sample: {len(train_nusc_infos)}, val sample: {len(val_nusc_infos)}"
         )
         with open(
-            root_path / f"infos_train_{nsweeps}sweeps_with{suffix}_filter_{filter_zero}.pkl", "wb"
+            root_path / f"infos_train_{sweep_str}sweeps_with{suffix}_filter_{filter_zero}.pkl", "wb"
         ) as f:
             pickle.dump(train_nusc_infos, f)
         with open(
-            root_path / f"infos_val_{nsweeps}sweeps_with{suffix}_filter_{filter_zero}.pkl", "wb"
+            root_path / f"infos_val_{sweep_str}sweeps_with{suffix}_filter_{filter_zero}.pkl", "wb"
         ) as f:
             pickle.dump(val_nusc_infos, f)
 

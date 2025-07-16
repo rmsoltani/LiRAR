@@ -36,11 +36,17 @@ def create_groundtruth_database(
     if "radar" in modalities:
         pipeline += [
             {
-                "type": "LoadPointCloudFromFile",
+                "type": "LoadRadarPointCloudFromFile",
                 "dataset": dataset_name_map[dataset_class_name],
-                "modality": "radar",
+                "align_velocity": True
             },
-            {"type": "LidarPlusRadarFusion", "radar_feature_mask": [2,5,6], "filter_unique_radar": True }
+            {
+                "type": "LidarPlusRadarFusion", 
+                "radar_feature_mask": [2,5,6], 
+                "filter_unique_radar": True,
+                "max_fusion_radius": 1,
+                "append_radar": True,
+            }
         ]
 
     if "nsweeps" in kwargs:
@@ -50,14 +56,17 @@ def create_groundtruth_database(
             pipeline=pipeline,
             test_mode=True,
             nsweeps=kwargs["nsweeps"],
+            nrsweeps=kwargs.get("nrsweeps", kwargs["nsweeps"]),
             virtual=virtual
         )
         nsweeps = dataset.nsweeps
+        nrsweeps = dataset.nrsweeps
     else:
         dataset = get_dataset(dataset_class_name)(
             info_path=info_path, root_path=data_path, test_mode=True, pipeline=pipeline
         )
         nsweeps = 1
+        nrsweeps = 1
 
     root_path = Path(data_path)
 
@@ -67,14 +76,14 @@ def create_groundtruth_database(
         suffix += "_radar" if "radar" in modalities else ""
         if db_path is None:
             if virtual:
-                db_path = root_path / f"gt_database_{nsweeps}sweeps_with{suffix}_virtual"
+                db_path = root_path / f"gt_database_{nsweeps}_{nrsweeps}sweeps_with{suffix}_virtual"
             else:
-                db_path = root_path / f"gt_database_{nsweeps}sweeps_with{suffix}"
+                db_path = root_path / f"gt_database_{nsweeps}_{nrsweeps}sweeps_with{suffix}"
         if dbinfo_path is None:
             if virtual:
-                dbinfo_path = root_path / f"dbinfos_train_{nsweeps}sweeps_with{suffix}_virtual.pkl"
+                dbinfo_path = root_path / f"dbinfos_train_{nsweeps}_{nrsweeps}sweeps_with{suffix}_virtual.pkl"
             else:
-                dbinfo_path = root_path / f"dbinfos_train_{nsweeps}sweeps_with{suffix}.pkl"
+                dbinfo_path = root_path / f"dbinfos_train_{nsweeps}_{nrsweeps}sweeps_with{suffix}.pkl"
     else:
         raise NotImplementedError()
 
