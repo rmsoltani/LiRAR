@@ -29,7 +29,6 @@ def create_groundtruth_database(
         {
             "type": "LoadPointCloudFromFile",
             "dataset": dataset_name_map[dataset_class_name],
-            "modality": "lidar",
         },
         {"type": "LoadPointCloudAnnotations", "with_bbox": True},
     ]
@@ -39,6 +38,15 @@ def create_groundtruth_database(
                 "type": "LoadRadarPointCloudFromFile",
                 "dataset": dataset_name_map[dataset_class_name],
                 "align_velocity": True
+            },
+            {
+                "type": "JointBilateralExpansion",
+                "window_size": [2.36,2.36],
+                "min_dist": 1,
+                "img_size": [800,450],
+                "confidence_threshold": 0.075,
+                "sigma_r": 12,
+                "sigma_s": 0.5,
             },
             {
                 "type": "LidarPlusRadarFusion", 
