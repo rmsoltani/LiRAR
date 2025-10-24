@@ -6,7 +6,18 @@ from nuscenes.utils.data_classes import PointCloud, LidarPointCloud
 
 @PIPELINES.register_module
 class LidarPlusRadarFusion(object):
-    def __init__(self, radar_feature_mask=None, max_fusion_radius=None, fusion_workers=-1, filter_unique_radar=False, fuse_on_global=True, append_radar=True) -> None:
+    def __init__(
+        self, 
+        radar_feature_mask=None,
+        max_fusion_radius=None, 
+        fusion_workers=-1, 
+        filter_unique_radar=False, 
+        fuse_on_global=True, 
+        append_radar=True, 
+        confidence_score=None,
+        ndims=3,
+        base_conf=0,
+    ) -> None:
         """
         :param radar_feature_mask: Either a list/tuple contain the indexes of the used features or a boolean mask.
         If excluded, no features will be used. (x,y,z coors do are not counted as 'features')
@@ -23,8 +34,12 @@ class LidarPlusRadarFusion(object):
         self.filter_unique_radar = filter_unique_radar
         self.fuse_on_global = fuse_on_global
         self.append_radar = append_radar
+        self.confidence_score = confidence_score
+        self.ndims = ndims
+        self.base_conf = base_conf
 
         print("Filter unique:", self.filter_unique_radar)
+        print("Confidence Score:", self.confidence_score)
 
         if radar_feature_mask is not None:
             radar_feature_mask = np.array(radar_feature_mask)
@@ -77,17 +92,25 @@ class LidarPlusRadarFusion(object):
 
     def _get_fused_points(self, lidar_points, radar_points):
 
-        radar_coords = radar_points[:, :3]
-        lidar_coords = lidar_points[:, :3]
+        radar_coords = radar_points[:, :self.ndims]
+        lidar_coords = lidar_points[:, :self.ndims]
 
         radar_features = radar_points[:, self.radar_feature_mask]
 
         extended_lidar_points = np.hstack((lidar_points, np.zeros([lidar_points.shape[0], radar_features.shape[1]])))
-        extended_radar_points = np.hstack((radar_coords, np.zeros([radar_points.shape[0], 1]), radar_features))
+        extended_radar_points = np.hstack((radar_points[:, :3], np.zeros([radar_points.shape[0], 1]), radar_features))
 
+        if self.confidence_score != None:
+            extended_lidar_points = np.hstack([extended_lidar_points, np.full([extended_lidar_points.shape[0], 1], self.base_conf)])
+            extended_radar_points = np.hstack([extended_radar_points, np.full([extended_radar_points.shape[0], 1], self.base_conf)])
+
+        num_fused = 0
         for curr, closest in self._get_closest_index(lidar_coords, radar_coords):
-            extended_lidar_points[curr, lidar_points.shape[1]:] = radar_features[closest]
-
+            extended_lidar_points[curr, lidar_points.shape[1]:lidar_points.shape[1]+radar_features.shape[1]] = radar_features[closest]
+            if self.confidence_score != None:
+                extended_lidar_points[curr, -1] = self._get_confidence_score(lidar_points[curr], radar_points[closest], mode=self.confidence_score)
+            num_fused += 1
+        
         if self.append_radar:
             fused_points = np.concatenate([extended_lidar_points, extended_radar_points])
         else:
@@ -106,37 +129,60 @@ class LidarPlusRadarFusion(object):
             if i != tree.n:
                 yield curr, i
             curr += 1
+    
+    def _get_confidence_score(self, lidar_point, radar_point, mode="sigmoid", ndims=2):
+        dist = np.linalg.norm(lidar_point[:ndims] - radar_point[:ndims])
+
+        if mode == "linear":
+            return 1 - dist / self.max_fusion_radius
         
+        if mode == "sigmoid":
+            return 0.5 - np.tanh((4 * dist / self.max_fusion_radius) - 2) / 2
+
+        
+        print(f"Invalid condindence score mode: '{mode}'")
+        return 0
+
     def _get_unique_radar(self, radar_points, radar_times):
         points, indexes =  np.unique(radar_points, return_index=True, axis=0)
         return points, radar_times[indexes]
 
     def _to_global_lidar_points(self, lidar_points, info):
         lidar_pc = LidarPointCloud(lidar_points.T)
-        lidar_pc.translate(np.array(info["ref_cs_rec"]['translation']))
         lidar_pc.rotate(Quaternion(info["ref_cs_rec"]['rotation']).rotation_matrix)
+        lidar_pc.translate(np.array(info["ref_cs_rec"]['translation']))
 
         # Second step: transform from ego to the global frame.
-        lidar_pc.translate(np.array(info["ref_pose_rec"]['translation']))
         lidar_pc.rotate(Quaternion(info["ref_pose_rec"]['rotation']).rotation_matrix)
+        lidar_pc.translate(np.array(info["ref_pose_rec"]['translation']))
 
         return lidar_pc.points.T
     
     def _from_global_lidar_points(self, lidar_points, info):
-        lidar_pc = LiRARPointCloud(lidar_points.T)
-        # lidar_pc = LidarPointCloud(lidar_points.T)
-        lidar_pc.rotate(Quaternion(np.array(info["ref_pose_rec"]['rotation'])).rotation_matrix.T)
-        lidar_pc.translate(-np.array(info["ref_pose_rec"]['translation']))
+        if self.confidence_score:
+            lidar_pc = EnhancedLiRARPointCloud(lidar_points.T)
+        else:
+            lidar_pc = BasicLiRARPointCloud(lidar_points.T)
 
-        lidar_pc.rotate(Quaternion(np.array(info["ref_cs_rec"]['rotation'])).rotation_matrix.T)
+        lidar_pc.translate(-np.array(info["ref_pose_rec"]['translation']))
+        lidar_pc.rotate(Quaternion(np.array(info["ref_pose_rec"]['rotation'])).rotation_matrix.T)
+
         lidar_pc.translate(-np.array(info["ref_cs_rec"]['translation']))
+        lidar_pc.rotate(Quaternion(np.array(info["ref_cs_rec"]['rotation'])).rotation_matrix.T)
 
         return lidar_pc.points.T
 
 
-class LiRARPointCloud(PointCloud):
+class BasicLiRARPointCloud(PointCloud):
     def nbr_dims(self):
         return 7
+    
+    def from_file(self):
+        raise NotImplementedError()
+    
+class EnhancedLiRARPointCloud(PointCloud):
+    def nbr_dims(self):
+        return 8
     
     def from_file(self):
         raise NotImplementedError()
