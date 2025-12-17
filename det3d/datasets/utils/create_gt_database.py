@@ -39,21 +39,31 @@ def create_groundtruth_database(
                 "dataset": dataset_name_map[dataset_class_name],
                 "align_velocity": True
             },
-            {
-                "type": "JointBilateralExpansion",
-                "window_size": [2.36,2.36],
-                "min_dist": 1,
-                "img_size": [800,450],
-                "confidence_threshold": 0.075,
-                "sigma_r": 12,
-                "sigma_s": 0.5,
-            },
+            # {
+            #     "type": "JointBilateralExpansion",
+            #     "window_size": [2.36,2.36],
+            #     "min_dist": 1,
+            #     "img_size": [800,450],
+            #     "confidence_threshold": 0.075,
+            #     "sigma_r": 12,
+            #     "sigma_s": 0.5,
+            # },
             {
                 "type": "LidarPlusRadarFusion", 
                 "radar_feature_mask": [2,5,6], 
                 "filter_unique_radar": True,
                 "max_fusion_radius": 1,
                 "append_radar": True,
+                "ndims": 3,
+                "confidence_config": {
+                    "base": 0.5,
+                    "dist": "exp",
+                    "dist_exp_pow": 5,
+                    "rcs": "exp",
+                    "rcs_exp_pow": 3,
+                    "merge_formula": "combine",
+                    "combine_pow": 3
+                }
             }
         ]
 
