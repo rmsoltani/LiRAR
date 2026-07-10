@@ -131,6 +131,14 @@ class LoadRadarPointCloudFromFile(object):
         self.front_only = kwargs.get("front_only", False)
         self.output_global = kwargs.get("output_global", True)
         self.align_velocity = kwargs.get("align_velocity", False)
+        self.stack = kwargs.get("stack", False)
+        self.stack_step = kwargs.get("stack_step", 0.1)
+        self.stack_height = kwargs.get("stack_height", 3)
+        self.stack_offset = kwargs.get("stack_offset", 0)
+
+        if self.stack:
+            assert self.stack_step > 0, "Invalid stack_step"
+            assert self.stack_height > 0, "Invalid stack_height"
 
     def __call__(self, res, info):
 
@@ -184,8 +192,21 @@ class LoadRadarPointCloudFromFile(object):
             
             points = np.hstack([points, pc.points])
             times = np.concatenate([times, chan_times], axis=0)
+        
 
-
+        res["radar"]["num_base_points"] = points.shape[1]
+        if self.stack:
+            stacked_points = np.empty([18, 0], dtype=np.float32)
+            used_height = 0
+            while used_height <= self.stack_height:
+                _points = np.copy(points)
+                _points[2] += used_height + self.stack_offset
+                
+                stacked_points = np.hstack([stacked_points, _points])
+                used_height += self.stack_step
+            
+            points = stacked_points
+ 
         points = points.T
         times = np.zeros([points.shape[0], 1])
 

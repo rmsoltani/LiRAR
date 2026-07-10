@@ -16,6 +16,7 @@ class LidarPlusRadarFusion(object):
         append_radar=True, 
         confidence_config=None,
         ndims=3,
+        **kwargs
     ) -> None:
         """
         :param radar_feature_mask: Either a list/tuple contain the indexes of the used features or a boolean mask.
@@ -35,6 +36,7 @@ class LidarPlusRadarFusion(object):
         self.append_radar = append_radar
         self.confidence_config = confidence_config
         self.ndims = ndims
+        self.sensor_type_feature = kwargs.get("sensor_type_feature", False)
 
         print("Filter unique:", self.filter_unique_radar)
         print("Confidence Config:", self.confidence_config)
@@ -70,10 +72,15 @@ class LidarPlusRadarFusion(object):
         if self.filter_unique_radar:
             radar_points, radar_times = self._get_unique_radar(radar_points, radar_times)
 
-        fused_points = self._get_fused_points(lidar_points, radar_points)
-        if self.append_radar:
+        if self.append_radar == "base":
+            num_radar_points = res["radar"]["num_base_points"]
+            fused_points = self._get_fused_points(lidar_points, radar_points, num_radar_points=num_radar_points)
+            fused_times = np.concatenate([lidar_times, radar_times[:num_radar_points]], dtype=np.float32)
+        elif self.append_radar:
+            fused_points = self._get_fused_points(lidar_points, radar_points, num_radar_points=radar_points.shape[0])
             fused_times = np.concatenate([lidar_times, radar_times], dtype=np.float32)
         else:
+            fused_points = self._get_fused_points(lidar_points, radar_points)
             fused_times = lidar_times
 
         if self.fuse_on_global:
@@ -88,7 +95,7 @@ class LidarPlusRadarFusion(object):
 
         return res, info
 
-    def _get_fused_points(self, lidar_points, radar_points):
+    def _get_fused_points(self, lidar_points, radar_points, num_radar_points=0):
 
         radar_coords = radar_points[:, :self.ndims]
         lidar_coords = lidar_points[:, :self.ndims]
@@ -103,13 +110,17 @@ class LidarPlusRadarFusion(object):
             extended_lidar_points = np.hstack([extended_lidar_points, np.full([extended_lidar_points.shape[0], 1], base_conf)])
             extended_radar_points = np.hstack([extended_radar_points, np.full([extended_radar_points.shape[0], 1], base_conf)])
 
+        if self.sensor_type_feature:
+            extended_lidar_points = np.hstack([extended_lidar_points, np.zeros([extended_lidar_points.shape[0], 1])])
+            extended_radar_points = np.hstack([extended_radar_points, np.ones([extended_radar_points.shape[0], 1])])
+
         for curr, closest in self._get_closest_index(lidar_coords, radar_coords):
             extended_lidar_points[curr, lidar_points.shape[1]:lidar_points.shape[1]+radar_features.shape[1]] = radar_features[closest]
             if self.confidence_config != None:
                 extended_lidar_points[curr, -1] = self._get_confidence_score(lidar_points[curr], radar_points[closest], config=self.confidence_config)
         
         if self.append_radar:
-            fused_points = np.concatenate([extended_lidar_points, extended_radar_points])
+            fused_points = np.concatenate([extended_lidar_points, extended_radar_points[:num_radar_points]])
         else:
             fused_points = extended_lidar_points
 
@@ -141,7 +152,7 @@ class LidarPlusRadarFusion(object):
 
         combine_pow = config.get("combine_pow", 3) # the power to use when method=combine
 
-        dist = np.linalg.norm(lidar_point[:dist_ndims] - radar_point[:dist_ndims])
+        dist = self._get_dist(lidar_point, radar_point, dist_ndims)
         norm_rcs = (np.clip(radar_point[3], rcs_min, rcs_max) - rcs_min) / (rcs_max - rcs_min)
 
         if dist_formula == "sigmoid":
@@ -170,6 +181,8 @@ class LidarPlusRadarFusion(object):
         
         raise ValueError(f"Invalid confidence config: {config}")
 
+    def _get_dist(self, lidar_point, radar_point, dist_ndims):
+        return np.linalg.norm(lidar_point[:dist_ndims] - radar_point[:dist_ndims])
 
     def _get_unique_radar(self, radar_points, radar_times):
         points, indexes =  np.unique(radar_points, return_index=True, axis=0)
@@ -201,6 +214,61 @@ class LidarPlusRadarFusion(object):
         return lidar_pc.points.T
 
 
+@PIPELINES.register_module
+class LidarPlusRadarPillarFusion(LidarPlusRadarFusion):
+
+    def __init__(self, height=1, k=16, **kwargs):
+        self.height = height
+        self.k = k
+
+        super().__init__(**kwargs)
+
+    def _get_closest_index(self, lidar_coords, radar_coords):
+        if self.max_fusion_radius is None:
+            return
+
+        tree = KDTree(radar_coords[:, :self.ndims])
+
+        indexes = tree.query(lidar_coords[:, :self.ndims], k=self.k, workers=self.fusion_workers)[1]
+
+        chosen = radar_coords[indexes]
+
+        z = lidar_coords[:, 2][:, None]
+        z0 = chosen[:, :, 2]
+        z1 = z0 + self.height
+
+        dz = np.maximum(np.maximum(z0 - z, z - z1), 0)
+
+        xy_diff = lidar_coords[:, None, :2] - chosen[:, :, :2]
+
+        dist = np.sqrt(
+            np.sum(xy_diff * xy_diff, axis=2)
+            + dz * dz
+        )
+
+        min_cols = np.argmin(dist, axis=1)
+        min_dists = dist[np.arange(len(min_cols)), min_cols]
+
+        dist_mask = min_dists <= self.max_fusion_radius
+
+        l_indexes = np.nonzero(dist_mask)[0]
+        r_indexes = indexes[dist_mask, min_cols[dist_mask]]
+
+        return np.column_stack((l_indexes, r_indexes))
+
+
+    def _get_dist(self, lidar_point, radar_point, dist_ndims):
+        z = lidar_point[2]
+        z0 = radar_point[2]
+        z1 = z0 + self.height
+        dz = np.maximum(np.maximum(z0 - z, z - z1), 0)
+        xy_diff = lidar_point[:2] - radar_point[:2]
+
+        dist = np.sqrt(
+            np.sum(xy_diff * xy_diff)
+            + dz * dz
+        )
+        return dist
 class BasicLiRARPointCloud(PointCloud):
     def nbr_dims(self):
         return 7
@@ -209,8 +277,12 @@ class BasicLiRARPointCloud(PointCloud):
         raise NotImplementedError()
     
 class EnhancedLiRARPointCloud(PointCloud):
+
+    def __init__(self, points):
+        self.points = points
+
     def nbr_dims(self):
-        return 8
+        return self.points.shape[0]
     
     def from_file(self):
         raise NotImplementedError()

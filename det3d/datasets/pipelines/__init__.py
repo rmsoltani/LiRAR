@@ -25,5 +25,6 @@ __all__ = [
     "AssignTarget",
     "AssignLabel",
     "LidarPlusRadarFusion",
+    "LidarPlusRadarPillarFusion",
     "JointBilateralExpansion",
 ]
