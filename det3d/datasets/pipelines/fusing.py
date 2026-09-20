@@ -36,7 +36,6 @@ class LidarPlusRadarFusion(object):
         self.append_radar = append_radar
         self.confidence_config = confidence_config
         self.ndims = ndims
-        self.sensor_type_feature = kwargs.get("sensor_type_feature", False)
 
         print("Filter unique:", self.filter_unique_radar)
         print("Confidence Config:", self.confidence_config)
@@ -71,13 +70,9 @@ class LidarPlusRadarFusion(object):
 
         if self.filter_unique_radar:
             radar_points, radar_times = self._get_unique_radar(radar_points, radar_times)
-
-        if self.append_radar == "base":
-            num_radar_points = res["radar"]["num_base_points"]
-            fused_points = self._get_fused_points(lidar_points, radar_points, num_radar_points=num_radar_points)
-            fused_times = np.concatenate([lidar_times, radar_times[:num_radar_points]], dtype=np.float32)
-        elif self.append_radar:
-            fused_points = self._get_fused_points(lidar_points, radar_points, num_radar_points=radar_points.shape[0])
+        
+        if self.append_radar:
+            fused_points = self._get_fused_points(lidar_points, radar_points)
             fused_times = np.concatenate([lidar_times, radar_times], dtype=np.float32)
         else:
             fused_points = self._get_fused_points(lidar_points, radar_points)
@@ -85,7 +80,6 @@ class LidarPlusRadarFusion(object):
 
         if self.fuse_on_global:
             fused_points = self._from_global_lidar_points(fused_points, info).astype(np.float32)
-
         else:
             fused_points = fused_points.astype(np.float32)
 
@@ -95,7 +89,7 @@ class LidarPlusRadarFusion(object):
 
         return res, info
 
-    def _get_fused_points(self, lidar_points, radar_points, num_radar_points=0):
+    def _get_fused_points(self, lidar_points, radar_points):
 
         radar_coords = radar_points[:, :self.ndims]
         lidar_coords = lidar_points[:, :self.ndims]
@@ -110,17 +104,13 @@ class LidarPlusRadarFusion(object):
             extended_lidar_points = np.hstack([extended_lidar_points, np.full([extended_lidar_points.shape[0], 1], base_conf)])
             extended_radar_points = np.hstack([extended_radar_points, np.full([extended_radar_points.shape[0], 1], base_conf)])
 
-        if self.sensor_type_feature:
-            extended_lidar_points = np.hstack([extended_lidar_points, np.zeros([extended_lidar_points.shape[0], 1])])
-            extended_radar_points = np.hstack([extended_radar_points, np.ones([extended_radar_points.shape[0], 1])])
-
         for curr, closest in self._get_closest_index(lidar_coords, radar_coords):
             extended_lidar_points[curr, lidar_points.shape[1]:lidar_points.shape[1]+radar_features.shape[1]] = radar_features[closest]
             if self.confidence_config != None:
                 extended_lidar_points[curr, -1] = self._get_confidence_score(lidar_points[curr], radar_points[closest], config=self.confidence_config)
         
         if self.append_radar:
-            fused_points = np.concatenate([extended_lidar_points, extended_radar_points[:num_radar_points]])
+            fused_points = np.concatenate([extended_lidar_points, extended_radar_points])
         else:
             fused_points = extended_lidar_points
 
@@ -143,17 +133,7 @@ class LidarPlusRadarFusion(object):
         dist_formula = config.get("dist") # formula to use to calculate distance confidence
         dist_exp_pow = config.get("dist_exp_pow", 5) # the power to in exp formula use when dist=exp
 
-        rcs_min = config.get("rcs_min", -5.0)
-        rcs_max = config.get("rcs_max", 50.0)
-        rcs_formula = config.get("rcs") # formula to use to calculate rcs confidence
-        rcs_exp_pow = config.get("rcs_exp_pow", 5) # the power to in exp formula use when rcs=exp
-        
-        merge_formula = config.get("merge_formula") # formula to use to merge distance and rcs confidence scores
-
-        combine_pow = config.get("combine_pow", 3) # the power to use when method=combine
-
         dist = self._get_dist(lidar_point, radar_point, dist_ndims)
-        norm_rcs = (np.clip(radar_point[3], rcs_min, rcs_max) - rcs_min) / (rcs_max - rcs_min)
 
         if dist_formula == "sigmoid":
             conf_dist = 0.5 - np.tanh((4 * dist / self.max_fusion_radius) - 2) / 2
@@ -162,24 +142,8 @@ class LidarPlusRadarFusion(object):
         elif dist_formula is not None:
             raise ValueError(f"Invalid dist mode: {dist_formula}")
         
-        if rcs_formula == "exp":
-            conf_rcs = ((((2 * norm_rcs) - 1) ** rcs_exp_pow) / 2) + 0.5
-        elif rcs_formula is not None:
-            raise ValueError(f"Invalid rcs mode: {rcs_formula}")
-        
-        if dist_formula and rcs_formula:
-            if merge_formula == "combine":
-                score = _combine_scores(conf_dist, conf_rcs, combine_pow)
-                return score
-            elif merge_formula == "conflate":
-                return (conf_dist * conf_rcs) / ((conf_dist * conf_rcs) + ((1 - conf_dist) * (1 - conf_rcs)))
-            raise ValueError(f"Invalid merge_formula: {merge_formula}")
-        elif dist_formula:
-            return conf_dist
-        elif rcs_formula:
-            return conf_rcs
-        
-        raise ValueError(f"Invalid confidence config: {config}")
+        return conf_dist
+
 
     def _get_dist(self, lidar_point, radar_point, dist_ndims):
         return np.linalg.norm(lidar_point[:dist_ndims] - radar_point[:dist_ndims])
@@ -286,9 +250,3 @@ class EnhancedLiRARPointCloud(PointCloud):
     
     def from_file(self):
         raise NotImplementedError()
-
-def _combine_scores(x, y, p):
-    s = x + y - 1
-    if s >= 0:
-        return (s ** p) / 2 + 0.5
-    return 0.5 - (abs(s) ** p) / 2
