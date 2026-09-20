@@ -5,16 +5,16 @@
 
 
 <!--
-    @article{soltani2024lirar,
+    @article{soltani2026lirar,
       title={Radar Fusion Into Lidar-Based Detection},
       author={Soltani, Reza and Lee, John, Sigafoos, Nathaniel},
-      journal={CVPR},
-      year={2024},
+      journal={MDPI},
+      year={2026},
     }
 -->
 
 ## Abstract
-Perception is one of the core concepts in autonomous driving. This involves the detection and tracking of an autonomous vehicle's (AV) surrounding objects using multiple sensors mounted to the AV. Fusing these sensors and creating multi-modality data increases metric accuracy and improves the system's robustness. This results in a more sophisticated and reliable perception system. While the topis of radar-camera fusion and lidar-camera fusion have been widely studied, the topic of radar-lidar fusion is often avoided. Those that do study it often present radar-lidar fusion as being complicated and difficult to implement properly. While this can be the case, it does not always have to be. In t his paper, we propose LiRAR, an early-fusion approach that allows for the near seamless addition of radar into models designed around lidar. We evaluate the effectiveness of this approach on the nuScenes dataset, where we show up to a 0.71% increase in mAP across all classes, achieving a score of 59.94. In addition, we analysis the strengths and weaknesses of this approach, and discuss methods that could be used to expand upon it.
+Perception is a fundamental component of autonomous driving systems. It involves the detection and tracking of objects surrounding an autonomous vehicle (AV) using multiple sensors mounted on the vehicle. Fusing these sensors to create multimodal data improves metric accuracy and improves system robustness. This results in a more sophisticated and reliable perception system. Many studies have been performed on the topics of radar-camera fusion and LiDAR-camera fusion. However, by comparison, far fewer have investigated radar-LiDAR fusion. Existing radar-LiDAR fusion approaches are often presented as complicated and difficult to implement properly. In this paper, we propose LiRAR, an early-fusion approach that allows for the near-seamless integration of radar into models designed around LiDAR. We evaluate the effectiveness of this approach on the nuScenes dataset, where we observe an increase of up to 1.57\% in mAP across all classes, achieving a score of 60.14. In addition, we analyze the strengths and limitations of the approach and discuss potential directions for further development. The code is available at https://github.com/rmsoltani/LiRAR.
 
 
 ## Main results
@@ -24,7 +24,7 @@ Perception is one of the core concepts in autonomous driving. This involves the 
 
 |         |  MAP ↑  | NDS ↑ |
 |---------|---------|-------|
-|  LiRAR  |  59.94  | 67.14 |   
+|  LiRAR  |  60.14  | 67.56 |   
    
 
 All results are tested on a Nvidia A100 GPU with batch size 4.
@@ -38,7 +38,7 @@ Please refer to [INSTALL](docs/INSTALL.md) to set up libraries needed for distri
 
 ### Benchmark Evaluation and Training 
 
-Please refer to [NUSC](docs/NUSC.md) to prepare the data. Then follow the instruction there to reproduce our detection and tracking results. All detection configurations are included in [configs](configs).
+Please refer to [NUSC](docs/NUSC.md) to prepare the data. Then follow the instruction there to reproduce our detection results. All detection configurations are included in [configs](configs).
 
 
 ## License

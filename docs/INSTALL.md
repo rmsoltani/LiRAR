@@ -14,7 +14,7 @@ Modified from [CenterPoint](https://github.com/tianweiy/CenterPoint/blob/3cf7d87
 We have tested the following versions of OS and softwares:
 
 - OS: Ubuntu 20.04
-- Python: 3.8.18
+- Python: 3.8.20
 - PyTorch: 1.10.1
 - spconv: 2.3.6
 - CUDA: 11.3
