@@ -6,7 +6,6 @@ from .loading import *
 from .test_aug import DoubleFlip
 from .preprocess import Preprocess, Voxelization
 from .fusing import *
-from .jbe import *
 
 __all__ = [
     "Compose",
